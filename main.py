@@ -1,8 +1,10 @@
 import os
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
@@ -14,6 +16,7 @@ GROUP_NAME = "ДЮ-9-2025, ДЮ-11-26"
 URL = "https://college-edu.ru/stud/raspisanie/"
 SUBSCRIBERS_FILE = "subscribers.json"
 MOSCOW = ZoneInfo("Europe/Moscow")
+PORT = int(os.environ.get("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,12 +34,25 @@ def save_subscribers(subs):
 
 subscribers = load_subscribers()
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logger.info(f"Health server on port {PORT}")
+    server.serve_forever()
+
 def get_schedule():
     try:
         r = requests.get(URL, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
-
         target = None
         for h2 in soup.find_all("h2"):
             if GROUP_NAME in h2.get_text():
@@ -44,7 +60,6 @@ def get_schedule():
                 break
         if not target:
             return {}
-
         days = {}
         for sib in target.find_next_siblings():
             if sib.name == "h2":
@@ -61,13 +76,10 @@ def get_schedule():
                     info = pair.find("div", class_="rasp__info")
                     teach = info.find("span", class_="rasp__teach") if info else None
                     aud = info.find("span", class_="rasp__aud") if info else None
-
                     num = time_el.find("b").get_text(strip=True) if time_el and time_el.find("b") else ""
                     tm = time_el.find("span").get_text(strip=True) if time_el and time_el.find("span") else ""
-
                     pairs.append({
-                        "num": num,
-                        "time": tm,
+                        "num": num, "time": tm,
                         "subj": subj.get_text(strip=True) if subj else "",
                         "teach": teach.get_text(strip=True) if teach else "",
                         "aud": aud.get_text(strip=True) if aud else ""
@@ -104,7 +116,7 @@ def get_schedule_for(date):
     for k, v in days.items():
         if k.startswith(key[:2]):
             return format_day(k, v)
-    return f"📅 {key}\n\nРасписание на этот день не найдено (возможно, выходной или ещё не опубликовано)."
+    return f"📅 {key}\n\nРасписание на этот день не найдено."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -112,10 +124,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subscribers)
     await update.message.reply_text(
         "Привет! Я бот расписания КЭСИ (группа ДЮ-9-25).\n\n"
-        "Команды:\n"
-        "• сегодня / /сегодня\n"
-        "• завтра / /завтра\n\n"
-        "Каждый день в 21:00 я буду присылать расписание на завтра."
+        "Команды:\n• сегодня / /сегодня\n• завтра / /завтра\n\n"
+        "Каждый день в 21:00 присылаю расписание на завтра."
     )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,8 +159,10 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subscribers)
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    # Запускаем health-сервер в отдельном потоке
+    threading.Thread(target=start_health_server, daemon=True).start()
 
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("сегодня", today))
     app.add_handler(CommandHandler("завтра", tomorrow))
